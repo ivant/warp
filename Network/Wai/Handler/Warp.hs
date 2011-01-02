@@ -259,7 +259,6 @@ sendResponse req hv socket (ResponseEnumerator res) = {-# SCC "sendResponseEnume
     go s hs = {-# SCC "sendResponseEnumerator.hasBody" #-} 
             chunk' $ 
             ({-# SCC "sendResponseEnumerator.hasBody.headers" #-} E.enumList 1 [headers hv s hs isChunked'])
-         $$ E.joinI $ ({-# SCC "sendResponseEnumerator.hasBody.builderToByteString" #-} builderToByteString)
          $$ ({-# SCC "sendResponseEnumerator.hasBody.iterSocket" #-} iterSocket socket >> return isKeepAlive)
       where
         hasLength = {-# SCC "sendResponseEnumerator.hasBody.hasLength" #-} lookup "content-length" hs /= Nothing
@@ -321,12 +320,14 @@ requestBodyHandle initLen =
             E.yield () $ E.Chunks [y]
             return (x, 0)
 
-iterSocket :: MonadIO m => Socket -> E.Iteratee ByteString m ()
+iterSocket :: MonadIO m => Socket -> E.Iteratee Builder m ()
 iterSocket socket =
     E.continue go
   where
     go E.EOF = E.yield () E.EOF
-    go (E.Chunks cs) = liftIO (Sock.sendMany socket cs) >> E.continue go
+    go (E.Chunks cs) = do
+      liftIO $ mapM_ (toByteStringIO $ Sock.sendAll socket) cs
+      E.continue go
 
 enumSocket :: Int -> Socket -> E.Enumerator ByteString IO a
 enumSocket len socket (E.Continue k) = do
