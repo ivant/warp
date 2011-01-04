@@ -32,6 +32,7 @@ import qualified Data.ByteString.Unsafe as S
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as L
 import Data.Word (Word8)
+import Data.List (foldl', foldl1')
 import Network
     ( listenOn, sClose, PortID(PortNumber), Socket
     , withSocketsDo)
@@ -55,7 +56,7 @@ import Blaze.ByteString.Builder.HTTP
 import Blaze.ByteString.Builder
     (copyByteString, Builder, toLazyByteString, toByteStringIO)
 import Blaze.ByteString.Builder.Char8 (fromChar, fromString)
-import Data.Monoid (mconcat, mappend)
+import Data.Monoid (mappend, mempty)
 import Network.Socket.SendFile (sendFile)
 
 import Control.Monad.IO.Class (MonadIO, liftIO)
@@ -237,28 +238,61 @@ parseFirst s = do
              return (method, rpath, qstring, httpVersion)
            | otherwise -> E.throwError NonHttp
          _ -> E.throwError $ BadFirstLine $ B.unpack s
+{-# INLINE parseFirst #-}
+
+{--}
+httpBuilder = copyByteString "HTTP/"
+spaceBuilder = fromChar ' '
+newlineBuilder = copyByteString "\r\n"
+transferEncodingBuilder = copyByteString "Transfer-Encoding: chunked\r\n\r\n"
+colonSpaceBuilder = copyByteString ": "
 
 headers :: HttpVersion -> Status -> ResponseHeaders -> Bool -> Builder
-headers httpversion status responseHeaders isChunked' = mconcat
-    [ copyByteString "HTTP/"
-    , copyByteString httpversion
-    , fromChar ' '
-    , fromString $ show $ statusCode status
-    , fromChar ' '
-    , copyByteString $ statusMessage status
-    , copyByteString "\r\n"
-    , mconcat $ map go responseHeaders
-    , if isChunked'
-        then copyByteString "Transfer-Encoding: chunked\r\n\r\n"
-        else copyByteString "\r\n"
-    ]
-  where
-    go (x, y) = mconcat
-        [ copyByteString $ ciOriginal x
-        , copyByteString ": "
-        , copyByteString y
-        , copyByteString "\r\n"
-        ]
+headers !httpversion !status !responseHeaders !isChunked' = {-# SCC "headers" #-}
+    let !start = httpBuilder
+                `mappend` copyByteString httpversion
+                `mappend` spaceBuilder
+                `mappend` (fromString $ show $ statusCode status)
+                `mappend` spaceBuilder
+                `mappend` (copyByteString $ statusMessage status)
+                `mappend` newlineBuilder
+        !start' = foldl' responseHeaderToBuilder start responseHeaders
+        !end = if isChunked'
+                 then transferEncodingBuilder
+                 else newlineBuilder
+    in mappend start' end
+
+responseHeaderToBuilder :: Builder -> (CIByteString, ByteString) -> Builder
+responseHeaderToBuilder b (x, y) = b
+  `mappend` (copyByteString $ ciOriginal x)
+  `mappend` colonSpaceBuilder
+  `mappend` copyByteString y
+  `mappend` newlineBuilder
+--}
+
+{--
+headers :: HttpVersion -> Status -> ResponseHeaders -> Bool -> Builder
+headers httpversion status responseHeaders isChunked' = {-# SCC "headers" #-}
+    let !start = copyByteString "HTTP/"
+                `mappend` copyByteString httpversion
+                `mappend` fromChar ' '
+                `mappend` (fromString $ show $ statusCode status)
+                `mappend` fromChar ' '
+                `mappend` (copyByteString $ statusMessage status)
+                `mappend` copyByteString "\r\n"
+        !start' = foldl' responseHeaderToBuilder start responseHeaders
+        !end = if isChunked'
+                 then copyByteString "Transfer-Encoding: chunked\r\n\r\n"
+                 else copyByteString "\r\n"
+    in mappend start' end
+    where
+      responseHeaderToBuilder :: Builder -> (CIByteString, ByteString) -> Builder
+      responseHeaderToBuilder b (x, y) = b
+        `mappend` (copyByteString $ ciOriginal x)
+        `mappend` copyByteString ": "
+        `mappend` copyByteString y
+        `mappend` copyByteString "\r\n"
+--}
 
 isChunked :: HttpVersion -> Bool
 isChunked = (==) http11
@@ -299,6 +333,10 @@ sendResponse req hv socket (ResponseEnumerator res) = {-# SCC "sendResponseEnume
             {-# SCC "sendResponseEnumerator.noBody.headers" #-} E.yield 0 $ E.Chunks [headers hv s hs isChunked'] 
             {-# SCC "sendResponseEnumerator.noBody.iterSocket" #-} iterSocket socket
             return isKeepAlive
+      where
+        hasLength = {-# SCC "sendResponseEnumerator.hasBody.hasLength" #-} lookup "content-length" hs /= Nothing
+        isChunked' = {-# SCC "sendResponseEnumerator.hasBody.isChunked'" #-} isChunked hv && not hasLength
+        isKeepAlive = {-# SCC "sendResponseEnumerator.hasBody.isKeepAlive" #-} isChunked' || hasLength
     go s hs = {-# SCC "sendResponseEnumerator.hasBody" #-} 
             chunk' $ do
               {-# SCC "sendResponseEnumerator.hasBody.headers" #-} E.yield 0 $ E.Chunks [headers hv s hs isChunked'] 
@@ -319,7 +357,7 @@ sendResponse req hv socket (ResponseEnumerator res) = {-# SCC "sendResponseEnume
         step k (E.Chunks builders) = {-# SCC "sendResponseEnumerator.hasBody.stepChunks" #-}
             k (E.Chunks [chunked]) >>== chunk
           where
-            chunked = {-# SCC "sendResponseEnumerator.hasBody.stepChunks.chunked" #-} chunkedTransferEncoding $ mconcat builders
+            chunked = {-# SCC "sendResponseEnumerator.hasBody.stepChunks.chunked" #-} chunkedTransferEncoding $ foldl1' mappend builders
 
 parseHeaderNoAttr :: ByteString -> (CIByteString, ByteString)
 parseHeaderNoAttr s =
