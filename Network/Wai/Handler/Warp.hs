@@ -403,12 +403,13 @@ requestBodyHandle initLen =
 
 iterSocket :: MonadIO m => Socket -> E.Iteratee Builder m ()
 iterSocket socket =
-    E.continue go
+    E.continue $ go mempty
   where
-    go E.EOF = E.yield () E.EOF
-    go (E.Chunks [cs]) = do
-      liftIO $ toByteStringIO (Sock.sendAll socket) cs
-      E.continue go
+    go !b E.EOF = do
+      liftIO $ Sock.sendMany socket $ L.toChunks $ toLazyByteString b
+      E.yield () E.EOF
+    go !b (E.Chunks [cs]) = do
+      E.continue $ go $ mappend b cs
 
 enumSocket :: Int -> Socket -> E.Enumerator ByteString IO a
 enumSocket len socket (E.Continue k) = do
