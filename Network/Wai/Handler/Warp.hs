@@ -105,7 +105,7 @@ maxHeaders, maxHeaderLength, bytesPerRead, readTimeout :: Int
 maxHeaders = 30
 maxHeaderLength = 1024
 bytesPerRead = 4096
-readTimeout = 30000000
+readTimeout = 3000000
 
 takeHeaders :: E.Iteratee S.ByteString IO [ByteString]
 takeHeaders = do
