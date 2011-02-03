@@ -75,7 +75,7 @@ import Data.Monoid (mappend, mconcat)
 import Network.Socket.SendFile (sendFile)
 
 import Control.Monad.IO.Class (liftIO)
-import qualified System.IO.Timeout as T
+import qualified Timeout as T
 import Data.Word (Word8)
 import Data.List (foldl')
 import Control.Monad (forever)
@@ -124,31 +124,30 @@ serveConnections onE port app socket = do
     tm <- T.initialize
     forever $ do
         (conn, sa) <- accept socket
-        putStrLn "Accepted"
         _ <- forkIO $ do
-            th <- T.register tm timeout
+            th <- T.register tm conn
             serveConnection tm th onE port app conn sa
         return ()
 
-serveConnection :: T.TimeoutManager
-                -> T.TimeoutHandle
+serveConnection :: T.Manager
+                -> T.Handle
                 -> (SomeException -> IO ())
                 -> Port -> Application -> Socket -> SockAddr -> IO ()
 serveConnection tm th onException port app conn remoteHost' = do
     catch
         (finally
           (E.run_ $ fromClient $$ serveConnection')
-          (putStrLn "Closing connection" >> sClose conn))
+          (sClose conn))
         onException
   where
     fromClient = enumSocket th bytesPerRead conn
     serveConnection' = do
         (enumeratee, env) <- parseRequest port remoteHost'
         -- Let the application run for as long as it wants
-        liftIO $ T.cancel th
+        liftIO $ T.pause th
         res <- E.joinI $ enumeratee $$ app env
-        th' <- liftIO $ T.register tm timeout
-        keepAlive <- liftIO $ sendResponse th' env (httpVersion env) conn res
+        liftIO $ T.resume th
+        keepAlive <- liftIO $ sendResponse th env (httpVersion env) conn res
         if keepAlive then serveConnection' else return ()
 
 parseRequest :: Port -> SockAddr -> E.Iteratee S.ByteString IO (E.Enumeratee ByteString ByteString IO a, Request)
@@ -271,7 +270,7 @@ isChunked = (==) http11
 hasBody :: Status -> Request -> Bool
 hasBody s req = s /= (Status 204 "") && requestMethod req /= "HEAD"
 
-sendResponse :: T.TimeoutHandle
+sendResponse :: T.Handle
              -> Request -> HttpVersion -> Socket -> Response -> IO Bool
 sendResponse th req hv socket (ResponseFile s hs fp) = do
     Sock.sendMany socket $ L.toChunks $ toLazyByteString $ headers hv s hs False
@@ -341,13 +340,13 @@ parseHeaderNoAttr s =
                     else rest
      in (mkCIByteString k, rest')
 
-enumSocket :: T.TimeoutHandle -> Int -> Socket -> E.Enumerator ByteString IO a
+enumSocket :: T.Handle -> Int -> Socket -> E.Enumerator ByteString IO a
 enumSocket th len socket =
     inner
   where
     inner (E.Continue k) = do
         bs <- liftIO $ Sock.recv socket len
-        liftIO $ T.tickle th timeout
+        liftIO $ T.tickle th
         if S.null bs
             then E.throwError SocketTimeout
             else go k bs
@@ -394,7 +393,7 @@ takeLineMax len front = do
                         E.yield () $ E.Chunks [B.drop 1 y]
                         return $ B.concat $ front [x']
 
-iterSocket :: T.TimeoutHandle
+iterSocket :: T.Handle
            -> Socket
            -> E.Iteratee B.ByteString IO ()
 iterSocket th sock =
@@ -404,5 +403,5 @@ iterSocket th sock =
     step (E.Chunks []) = E.continue step
     step (E.Chunks xs) = do
         liftIO $ Sock.sendMany sock xs
-        liftIO $ T.tickle th timeout
+        liftIO $ T.tickle th
         E.continue step
