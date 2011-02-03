@@ -125,13 +125,13 @@ serveConnections onE port app socket = do
         (conn, sa) <- accept socket
         _ <- forkIO $ do
             th <- T.register tm $ sClose conn
-            serveConnection th onE port app conn sa
+            serveConnection tm th onE port app conn sa
         return ()
 
-serveConnection :: T.Handle
+serveConnection :: T.Manager -> T.Handle
                 -> (SomeException -> IO ())
                 -> Port -> Application -> Socket -> SockAddr -> IO ()
-serveConnection th onException port app conn remoteHost' = do
+serveConnection tm th onException port app conn remoteHost' = do
     catch
         (finally
           (E.run_ $ fromClient $$ serveConnection')
@@ -142,10 +142,10 @@ serveConnection th onException port app conn remoteHost' = do
     serveConnection' = do
         (enumeratee, env) <- parseRequest port remoteHost'
         -- Let the application run for as long as it wants
-        --FIXME liftIO $ T.pause th
+        liftIO $ T.cancel th
         res <- E.joinI $ enumeratee $$ app env
-        --liftIO $ T.resume th
-        keepAlive <- liftIO $ sendResponse th env (httpVersion env) conn res
+        th' <- liftIO $ T.register tm $ sClose conn
+        keepAlive <- liftIO $ sendResponse th' env (httpVersion env) conn res
         if keepAlive then serveConnection' else return ()
 
 parseRequest :: Port -> SockAddr -> E.Iteratee S.ByteString IO (E.Enumeratee ByteString ByteString IO a, Request)
