@@ -46,6 +46,7 @@ module Network.Wai.Handler.Warp
 import Prelude hiding (catch, lines)
 import Network.Wai
 
+import Network.Wai.Handler.ChunkedEncoding (fromHttpChunked)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Unsafe as SU
@@ -171,12 +172,15 @@ serveConnection th onException port app conn remoteHost' = do
         (len, env) <- parseRequest port remoteHost'
         -- Let the application run for as long as it wants
         liftIO $ T.pause th
-        res <- E.joinI $ EB.isolate len $$ app env
+        res <- case len of
+            Just l  -> E.joinI $ EB.isolate l $$ app env
+            Nothing -> E.joinI $ fromHttpChunked $$ app env
+
         liftIO $ T.resume th
         keepAlive <- liftIO $ sendResponse th env (httpVersion env) conn res
         if keepAlive then serveConnection' else return ()
 
-parseRequest :: Port -> SockAddr -> E.Iteratee S.ByteString IO (Integer, Request)
+parseRequest :: Port -> SockAddr -> E.Iteratee S.ByteString IO (Maybe Integer, Request)
 parseRequest port remoteHost' = do
     headers' <- takeHeaders
     parseRequest' port headers' remoteHost'
@@ -199,7 +203,7 @@ instance Exception InvalidRequest
 parseRequest' :: Port
               -> [ByteString]
               -> SockAddr
-              -> E.Iteratee S.ByteString IO (Integer, Request)
+              -> E.Iteratee S.ByteString IO (Maybe Integer, Request)
 parseRequest' _ [] _ = E.throwError $ NotEnoughLines []
 parseRequest' port (firstLine:otherLines) remoteHost' = do
     (method, rpath', gets, httpversion) <- parseFirst firstLine
@@ -213,8 +217,8 @@ parseRequest' port (firstLine:otherLines) remoteHost' = do
     let host = fromMaybe host' $ lookup "host" heads
     let len =
             case lookup "content-length" heads of
-                Nothing -> 0
-                Just bs -> fromIntegral $ B.foldl' (\i c -> i * 10 + C.digitToInt c) 0 $ B.takeWhile C.isDigit bs
+                Nothing -> Nothing
+                Just bs -> Just $ fromIntegral $ B.foldl' (\i c -> i * 10 + C.digitToInt c) 0 $ B.takeWhile C.isDigit bs
     let serverName' = takeUntil 58 host -- ':'
     -- FIXME isolate takes an Integer instead of Int or Int64. If this is a
     -- performance penalty, we may need our own version.
@@ -349,7 +353,7 @@ sendResponse th req hv socket (ResponseBuilder s hs b)
 sendResponse th req hv socket (ResponseEnumerator res) =
     res go
   where
-    -- FIXME perhaps alloca a buffer per thread and reuse that in all functiosn below. Should lessen greatly the GC burden (I hope)
+    -- FIXME perhaps alloca a buffer per thread and reuse that in all functions below. Should lessen greatly the GC burden (I hope)
     go s hs | not (hasBody s req) = do
             liftIO $ Sock.sendMany socket
                    $ L.toChunks $ toLazyByteString
